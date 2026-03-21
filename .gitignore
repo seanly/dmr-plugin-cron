@@ -1,0 +1,19 @@
+# Binary
+dmr-plugin-cron
+dmr-plugin-cron-linux-amd64
+dmr-plugin-cron-linux-arm64
+dmr-plugin-cron-darwin-amd64
+dmr-plugin-cron-darwin-arm64
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
