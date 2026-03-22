@@ -14,7 +14,7 @@ import (
 func cronToolDefs() []proto.ToolDef {
 	return []proto.ToolDef{
 		{
-			Name:        "cron.list",
+			Name:        "cronList",
 			Description: "List cron jobs loaded from the plugin storage (file or database).",
 			ParametersJSON: `{
   "type": "object",
@@ -27,7 +27,7 @@ func cronToolDefs() []proto.ToolDef {
 }`,
 		},
 		{
-			Name:        "cron.show",
+			Name:        "cronShow",
 			Description: "Show one cron job by id.",
 			ParametersJSON: `{
   "type": "object",
@@ -38,7 +38,7 @@ func cronToolDefs() []proto.ToolDef {
 }`,
 		},
 		{
-			Name:        "cron.reload",
+			Name:        "cronReload",
 			Description: "Reload jobs from storage and rebuild the internal scheduler (same as reload_interval tick).",
 			ParametersJSON: `{
   "type": "object",
@@ -46,7 +46,7 @@ func cronToolDefs() []proto.ToolDef {
 }`,
 		},
 		{
-			Name:        "cron.add",
+			Name:        "cronAdd",
 			Description: "Create or replace a cron job (upsert). After success, the scheduler reloads. You must set tape_name (e.g. feishu:p2p:<chat_id>) — CallTool does not receive the current tape automatically. Use run_once=true for one-shot reminders (auto-deleted after first successful run).",
 			ParametersJSON: `{
   "type": "object",
@@ -80,7 +80,7 @@ func cronToolDefs() []proto.ToolDef {
 }`,
 		},
 		{
-			Name:        "cron.remove",
+			Name:        "cronRemove",
 			Description: "Delete a cron job by id, then reload the scheduler.",
 			ParametersJSON: `{
   "type": "object",
@@ -118,16 +118,16 @@ func (p *CronPlugin) CallTool(req *proto.CallToolRequest, resp *proto.CallToolRe
 	defer cancel()
 
 	switch req.Name {
-	case "cron.list":
+	case "cronList":
 		return p.toolList(ctx, args, resp)
-	case "cron.show":
+	case "cronShow":
 		return p.toolShow(ctx, args, resp)
-	case "cron.reload":
+	case "cronReload":
 		p.reloadFromStorage()
 		return writeResult(resp, map[string]any{"ok": true})
-	case "cron.add":
+	case "cronAdd":
 		return p.toolAdd(ctx, args, resp)
-	case "cron.remove":
+	case "cronRemove":
 		return p.toolRemove(ctx, args, resp)
 	default:
 		resp.Error = fmt.Sprintf("unknown tool %q", req.Name)

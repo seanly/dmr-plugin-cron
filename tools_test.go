@@ -18,7 +18,7 @@ func TestCallToolCronAddListRemove(t *testing.T) {
 
 	var resp proto.CallToolResponse
 	err := p.CallTool(&proto.CallToolRequest{
-		Name:     "cron.add",
+		Name:     "cronAdd",
 		ArgsJSON: `{"schedule":"0 * * * *","tape_name":"web","prompt":"hello","id":"fixed-id"}`,
 	}, &resp)
 	if err != nil || resp.Error != "" {
@@ -31,7 +31,7 @@ func TestCallToolCronAddListRemove(t *testing.T) {
 	}
 
 	resp = proto.CallToolResponse{}
-	_ = p.CallTool(&proto.CallToolRequest{Name: "cron.list", ArgsJSON: `{}`}, &resp)
+	_ = p.CallTool(&proto.CallToolRequest{Name: "cronList", ArgsJSON: `{}`}, &resp)
 	if resp.Error != "" {
 		t.Fatal(resp.Error)
 	}
@@ -43,19 +43,19 @@ func TestCallToolCronAddListRemove(t *testing.T) {
 	}
 
 	resp = proto.CallToolResponse{}
-	_ = p.CallTool(&proto.CallToolRequest{Name: "cron.show", ArgsJSON: `{"id":"fixed-id"}`}, &resp)
+	_ = p.CallTool(&proto.CallToolRequest{Name: "cronShow", ArgsJSON: `{"id":"fixed-id"}`}, &resp)
 	if resp.Error != "" {
 		t.Fatal(resp.Error)
 	}
 
 	resp = proto.CallToolResponse{}
-	_ = p.CallTool(&proto.CallToolRequest{Name: "cron.remove", ArgsJSON: `{"id":"fixed-id"}`}, &resp)
+	_ = p.CallTool(&proto.CallToolRequest{Name: "cronRemove", ArgsJSON: `{"id":"fixed-id"}`}, &resp)
 	if resp.Error != "" {
 		t.Fatal(resp.Error)
 	}
 
 	resp = proto.CallToolResponse{}
-	_ = p.CallTool(&proto.CallToolRequest{Name: "cron.list", ArgsJSON: `{}`}, &resp)
+	_ = p.CallTool(&proto.CallToolRequest{Name: "cronList", ArgsJSON: `{}`}, &resp)
 	_ = json.Unmarshal([]byte(resp.ResultJSON), &listOut)
 	if len(listOut.Jobs) != 0 {
 		t.Fatalf("expected empty after remove: %+v", listOut.Jobs)
@@ -71,7 +71,7 @@ func TestCallToolCronAddRunOncePersists(t *testing.T) {
 
 	var resp proto.CallToolResponse
 	err := p.CallTool(&proto.CallToolRequest{
-		Name:     "cron.add",
+		Name:     "cronAdd",
 		ArgsJSON: `{"schedule":"0 * * * *","tape_name":"web","prompt":"ping","id":"once-1","run_once":true}`,
 	}, &resp)
 	if err != nil || resp.Error != "" {
@@ -79,7 +79,7 @@ func TestCallToolCronAddRunOncePersists(t *testing.T) {
 	}
 
 	resp = proto.CallToolResponse{}
-	_ = p.CallTool(&proto.CallToolRequest{Name: "cron.show", ArgsJSON: `{"id":"once-1"}`}, &resp)
+	_ = p.CallTool(&proto.CallToolRequest{Name: "cronShow", ArgsJSON: `{"id":"once-1"}`}, &resp)
 	if resp.Error != "" {
 		t.Fatal(resp.Error)
 	}

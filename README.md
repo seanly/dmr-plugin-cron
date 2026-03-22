@@ -78,21 +78,21 @@ When the plugin is enabled with YAML `name: cron`, the host registers these tool
 
 | Tool | Description |
 |------|-------------|
-| `cron.list` | List jobs. Optional arg `enabled_only` (bool). |
-| `cron.show` | Arg `id` — return one job or error if missing. |
-| `cron.reload` | Reload storage and rebuild the scheduler (same as `reload_interval`). |
-| `cron.add` | Upsert a job: args `schedule`, `tape_name`, `prompt`; optional `id` (UUID generated if omitted), `enabled` (default true), **`run_once`** (default false — if true, job is deleted after first successful run). **Reloads scheduler after write.** |
-| `cron.remove` | Arg `id` — delete job; **reloads scheduler**. Returns error if id not found. |
+| `cronList` | List jobs. Optional arg `enabled_only` (bool). |
+| `cronShow` | Arg `id` — return one job or error if missing. |
+| `cronReload` | Reload storage and rebuild the scheduler (same as `reload_interval`). |
+| `cronAdd` | Upsert a job: args `schedule`, `tape_name`, `prompt`; optional `id` (UUID generated if omitted), `enabled` (default true), **`run_once`** (default false — if true, job is deleted after first successful run). **Reloads scheduler after write.** |
+| `cronRemove` | Arg `id` — delete job; **reloads scheduler**. Returns error if id not found. |
 
 **Feishu / external channels:** `CallTool` does **not** receive the current tape. The model must pass **`tape_name`** explicitly (e.g. `feishu:p2p:<chat_id>` for the active DM). Put that in your Feishu system prompt when you want natural-language reminders.
 
-**Concurrency:** File storage uses an internal mutex for read/write; after `cron.add` / `cron.remove`, the plugin reloads the robfig scheduler without restarting `dmr serve`.
+**Concurrency:** File storage uses an internal mutex for read/write; after `cronAdd` / `cronRemove`, the plugin reloads the robfig scheduler without restarting `dmr serve`.
 
 ## OPA / approvals
 
-- `cron.add` and `cron.remove` persist jobs and affect future `RunAgent` runs on arbitrary tapes — treat them as **high risk** in production.
-- Recommended: extend **`opa_policy`** rules so `cron.add` / `cron.remove` are **`require_approval`** or **deny**, while `cron.list` / `cron.show` / `cron.reload` can stay **allow** (adjust to your threat model).
-- In DMR, see the `opa_policy` plugin and your custom `.rego` files for how `input.tool` (e.g. `cron.add`) is evaluated.
+- `cronAdd` and `cronRemove` persist jobs and affect future `RunAgent` runs on arbitrary tapes — treat them as **high risk** in production.
+- Recommended: extend **`opa_policy`** rules so `cronAdd` / `cronRemove` are **`require_approval`** or **deny**, while `cronList` / `cronShow` / `cronReload` can stay **allow** (adjust to your threat model).
+- In DMR, see the `opa_policy` plugin and your custom `.rego` files for how `input.tool` (e.g. `cronAdd`) is evaluated.
 
 ## Behaviour
 
@@ -100,7 +100,7 @@ When the plugin is enabled with YAML `name: cron`, the host registers these tool
 - **Execution**: one global mutex serializes `RunAgent` calls.
 - **Shutdown**: stops cron, waits for in-flight jobs up to ~45s; cancels runs with a 30-minute RPC safeguard per job.
 - **Feishu**: use `tape_name: feishu:p2p:<chat_id>` and put tool instructions in `prompt`; enable the Feishu plugin on the host.
-- **One-shot reminders**: set `run_once: true` on `cron.add` (or in the JSON file) so the job is removed after one successful execution; repeating schedules without `run_once` stay until `cron.remove` or manual edit.
+- **One-shot reminders**: set `run_once: true` on `cronAdd` (or in the JSON file) so the job is removed after one successful execution; repeating schedules without `run_once` stay until `cronRemove` or manual edit.
 - **Approvals / OPA**: same as any other `RunAgent` run; unattended `require_approval` may deny.
 
 ## Relative paths
