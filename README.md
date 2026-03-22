@@ -22,6 +22,8 @@ plugins:
     config:
       timezone: Asia/Shanghai
       reload_interval: 30s   # optional: reload jobs from storage
+      # optional: error | info (default) | debug — controls stderr volume from this plugin
+      log_level: info
       storage:
         driver: file
         # Relative to the directory containing the main DMR config file
@@ -29,6 +31,8 @@ plugins:
 ```
 
 DMR injects **`config_base_dir`** (absolute path of the config file’s directory) into the plugin JSON; do not set it manually.
+
+**`log_level`** (optional): `error` — only failures (RPC/agent errors, load errors, timeouts); `info` (default) — also lifecycle, a **single line per scheduler reload** (`scheduler reloaded: N enabled job(s)`), and invalid-job notices; `debug` — also every `registered job …` line and successful run step counts. Hosts using go-plugin may still label plugin stderr as DEBUG; this knob mainly reduces **how many** lines are emitted.
 
 ### Storage drivers
 

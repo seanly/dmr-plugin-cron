@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/rpc"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,11 +14,34 @@ import (
 	"github.com/seanly/dmr/pkg/plugin/proto"
 )
 
+// cronLogLevel controls stderr volume from this plugin (see log_level in config).
+type cronLogLevel int
+
+const (
+	cronLogError cronLogLevel = iota // errors and serious failures only
+	cronLogInfo                      // + lifecycle, reload summary, validation notices
+	cronLogDebug                     // + per-job registration, run success detail
+)
+
+func parseCronLogLevel(s string) cronLogLevel {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "error":
+		return cronLogError
+	case "debug":
+		return cronLogDebug
+	case "info", "":
+		return cronLogInfo
+	default:
+		return cronLogInfo
+	}
+}
+
 // CronPlugin implements proto.DMRPluginInterface and HostClientSetter.
 type CronPlugin struct {
 	mu       sync.Mutex
 	startOnce sync.Once
 
+	logLevel cronLogLevel
 	cfg cronPluginConfig
 	hostClient  *rpc.Client
 	storage     Storage
@@ -32,6 +56,7 @@ type cronPluginConfig struct {
 	Timezone       string `json:"timezone"`
 	ConfigBaseDir  string `json:"config_base_dir"`
 	ReloadInterval string `json:"reload_interval"`
+	LogLevel       string `json:"log_level"`
 	Storage        struct {
 		Driver string `json:"driver"`
 		Path   string `json:"path"`
@@ -41,7 +66,24 @@ type cronPluginConfig struct {
 
 // NewCronPlugin creates a CronPlugin with defaults.
 func NewCronPlugin() *CronPlugin {
-	return &CronPlugin{}
+	// Default info so logs before Init (e.g. SetHostClient) match post-Init default log_level.
+	return &CronPlugin{logLevel: cronLogInfo}
+}
+
+func (p *CronPlugin) logErrorf(format string, args ...any) {
+	log.Printf("dmr-plugin-cron: "+format, args...)
+}
+
+func (p *CronPlugin) logInfof(format string, args ...any) {
+	if p.logLevel >= cronLogInfo {
+		log.Printf("dmr-plugin-cron: "+format, args...)
+	}
+}
+
+func (p *CronPlugin) logDebugf(format string, args ...any) {
+	if p.logLevel >= cronLogDebug {
+		log.Printf("dmr-plugin-cron: "+format, args...)
+	}
 }
 
 func (p *CronPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) error {
@@ -52,6 +94,7 @@ func (p *CronPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) erro
 	if err := json.Unmarshal([]byte(raw), &p.cfg); err != nil {
 		return fmt.Errorf("parse cron config: %w", err)
 	}
+	p.logLevel = parseCronLogLevel(p.cfg.LogLevel)
 	if p.cfg.Storage.Driver == "" {
 		return fmt.Errorf("cron plugin: storage.driver is required")
 	}
@@ -71,7 +114,7 @@ func (p *CronPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) erro
 	p.storage = st
 
 	p.shutdownCtx, p.cancelRun = context.WithCancel(context.Background())
-	log.Printf("dmr-plugin-cron: init driver=%s config_base_dir=%q", p.cfg.Storage.Driver, p.cfg.ConfigBaseDir)
+	p.logInfof("init driver=%s config_base_dir=%q", p.cfg.Storage.Driver, p.cfg.ConfigBaseDir)
 
 	// go-plugin calls InitHost (SetHostClient) before Plugin.Init on the child; do not start
 	// the scheduler until both storage and hostClient are set.
@@ -83,14 +126,14 @@ func (p *CronPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) erro
 func (p *CronPlugin) SetHostClient(client any) {
 	rpcClient, ok := client.(*rpc.Client)
 	if !ok {
-		log.Printf("dmr-plugin-cron: SetHostClient unexpected type %T", client)
+		p.logErrorf("SetHostClient unexpected type %T", client)
 		return
 	}
 	p.mu.Lock()
 	p.hostClient = rpcClient
 	p.mu.Unlock()
 
-	log.Println("dmr-plugin-cron: host RPC client attached")
+	p.logInfof("host RPC client attached")
 	p.tryStartScheduler()
 }
 
@@ -103,7 +146,7 @@ func (p *CronPlugin) tryStartScheduler() {
 		return
 	}
 	p.startOnce.Do(func() {
-		log.Println("dmr-plugin-cron: storage and host ready, starting scheduler")
+		p.logInfof("storage and host ready, starting scheduler")
 		go p.runSchedulerLoop()
 	})
 }
@@ -115,7 +158,7 @@ func (p *CronPlugin) runSchedulerLoop() {
 	if s := p.cfg.ReloadInterval; s != "" {
 		d, err := time.ParseDuration(s)
 		if err != nil {
-			log.Printf("dmr-plugin-cron: invalid reload_interval %q: %v", s, err)
+			p.logInfof("invalid reload_interval %q: %v", s, err)
 		} else {
 			reloadDur = d
 		}
@@ -145,7 +188,7 @@ func (p *CronPlugin) effectiveLocation() *time.Location {
 	if tz := p.cfg.Timezone; tz != "" {
 		l, err := time.LoadLocation(tz)
 		if err != nil {
-			log.Printf("dmr-plugin-cron: timezone error: %v, using Local", err)
+			p.logInfof("timezone error: %v, using Local", err)
 		} else {
 			loc = l
 		}
@@ -163,7 +206,7 @@ func (p *CronPlugin) applyJobs(loc *time.Location) {
 	defer p.mu.Unlock()
 
 	if p.storage == nil {
-		log.Printf("dmr-plugin-cron: applyJobs skipped: storage not initialized")
+		p.logErrorf("applyJobs skipped: storage not initialized")
 		return
 	}
 
@@ -175,33 +218,36 @@ func (p *CronPlugin) applyJobs(loc *time.Location) {
 
 	jobs, err := p.storage.LoadJobs(context.Background())
 	if err != nil {
-		log.Printf("dmr-plugin-cron: LoadJobs: %v", err)
+		p.logErrorf("LoadJobs: %v", err)
 		return
 	}
 
 	c := cron.New(cron.WithLocation(loc))
+	registered := 0
 	for _, j := range jobs {
 		if !j.Enabled {
 			continue
 		}
 		if j.ID == "" || j.Schedule == "" || j.TapeName == "" {
-			log.Printf("dmr-plugin-cron: skip invalid job (missing id/schedule/tape_name): %+v", j)
+			p.logInfof("skip invalid job (missing id/schedule/tape_name): %+v", j)
 			continue
 		}
 		job := j
 		_, err := c.AddFunc(j.Schedule, func() { p.runJob(job) })
 		if err != nil {
-			log.Printf("dmr-plugin-cron: job %q invalid schedule %q: %v", j.ID, j.Schedule, err)
+			p.logInfof("job %q invalid schedule %q: %v", j.ID, j.Schedule, err)
 			continue
 		}
+		registered++
 		if job.RunOnce {
-			log.Printf("dmr-plugin-cron: registered job %q schedule=%q tape=%q run_once=true", j.ID, j.Schedule, j.TapeName)
+			p.logDebugf("registered job %q schedule=%q tape=%q run_once=true", j.ID, j.Schedule, j.TapeName)
 		} else {
-			log.Printf("dmr-plugin-cron: registered job %q schedule=%q tape=%q", j.ID, j.Schedule, j.TapeName)
+			p.logDebugf("registered job %q schedule=%q tape=%q", j.ID, j.Schedule, j.TapeName)
 		}
 	}
 	c.Start()
 	p.cron = c
+	p.logInfof("scheduler reloaded: %d enabled job(s)", registered)
 }
 
 func (p *CronPlugin) runJob(j Job) {
@@ -214,7 +260,7 @@ func (p *CronPlugin) runJob(j Job) {
 	p.mu.Unlock()
 
 	if hc == nil {
-		log.Printf("dmr-plugin-cron: job %q skipped: host not connected", j.ID)
+		p.logInfof("job %q skipped: host not connected", j.ID)
 		return
 	}
 	if ctx.Err() != nil {
@@ -236,19 +282,19 @@ func (p *CronPlugin) runJob(j Job) {
 	select {
 	case err := <-done:
 		if err != nil {
-			log.Printf("dmr-plugin-cron: job %q RunAgent RPC error: %v", j.ID, err)
+			p.logErrorf("job %q RunAgent RPC error: %v", j.ID, err)
 			return
 		}
 		if resp.Error != "" {
-			log.Printf("dmr-plugin-cron: job %q agent error: %s", j.ID, resp.Error)
+			p.logErrorf("job %q agent error: %s", j.ID, resp.Error)
 		} else {
 			success = true
-			log.Printf("dmr-plugin-cron: job %q completed steps=%d", j.ID, resp.Steps)
+			p.logDebugf("job %q completed steps=%d", j.ID, resp.Steps)
 		}
 	case <-ctx.Done():
-		log.Printf("dmr-plugin-cron: job %q cancelled during shutdown", j.ID)
+		p.logInfof("job %q cancelled during shutdown", j.ID)
 	case <-time.After(30 * time.Minute):
-		log.Printf("dmr-plugin-cron: job %q RunAgent timeout (30m)", j.ID)
+		p.logErrorf("job %q RunAgent timeout (30m)", j.ID)
 	}
 
 	if success && j.RunOnce {
@@ -270,10 +316,10 @@ func (p *CronPlugin) cleanupRunOnceJob(id string) {
 		return
 	}
 	if err := st.DeleteJob(ctx, id); err != nil {
-		log.Printf("dmr-plugin-cron: run_once job %q delete failed: %v", id, err)
+		p.logErrorf("run_once job %q delete failed: %v", id, err)
 		return
 	}
-	log.Printf("dmr-plugin-cron: run_once job %q removed after successful run", id)
+	p.logDebugf("run_once job %q removed after successful run", id)
 	p.reloadFromStorage()
 }
 
@@ -293,7 +339,7 @@ func (p *CronPlugin) Shutdown(req *proto.ShutdownRequest, resp *proto.ShutdownRe
 		select {
 		case <-ctx.Done():
 		case <-time.After(45 * time.Second):
-			log.Println("dmr-plugin-cron: cron.Stop timed out")
+			p.logErrorf("cron.Stop timed out")
 		}
 	} else {
 		p.mu.Unlock()
