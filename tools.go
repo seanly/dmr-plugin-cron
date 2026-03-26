@@ -57,7 +57,7 @@ func cronToolDefs() []proto.ToolDef {
     },
     "schedule": {
       "type": "string",
-      "description": "5-field cron: minute hour day-of-month month day-of-week (e.g. 0 20 * * * for 20:00 daily in plugin timezone)."
+      "description": "5-field cron (minute hour day-of-month month day-of-week, e.g. 0 20 * * *), robfig descriptor such as @every 1h, or now / @now for one immediate run (removed from storage after first successful RunAgent; failures keep the job for retry on next reload)."
     },
     "tape_name": {
       "type": "string",

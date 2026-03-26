@@ -48,6 +48,8 @@ type CronPlugin struct {
 	cron        *cron.Cron
 	reloadStop  chan struct{}
 	runMu       sync.Mutex // serial RunAgent
+	// immediateRun prevents duplicate goroutines for the same job id while an immediate run is in flight.
+	immediateRun sync.Map // string (job ID) -> struct{}
 	shutdownCtx context.Context
 	cancelRun   context.CancelFunc
 }
@@ -233,6 +235,12 @@ func (p *CronPlugin) applyJobs(loc *time.Location) {
 			continue
 		}
 		job := j
+		if isImmediateSchedule(j.Schedule) {
+			p.queueImmediateRun(job)
+			registered++
+			p.logDebugf("queued immediate job %q tape=%q", j.ID, j.TapeName)
+			continue
+		}
 		_, err := c.AddFunc(j.Schedule, func() { p.runJob(job) })
 		if err != nil {
 			p.logInfof("job %q invalid schedule %q: %v", j.ID, j.Schedule, err)
@@ -248,6 +256,19 @@ func (p *CronPlugin) applyJobs(loc *time.Location) {
 	c.Start()
 	p.cron = c
 	p.logInfof("scheduler reloaded: %d enabled job(s)", registered)
+}
+
+// queueImmediateRun starts runJob once per job id until it finishes; applyJobs reloads do not stack duplicates.
+func (p *CronPlugin) queueImmediateRun(j Job) {
+	if _, loaded := p.immediateRun.LoadOrStore(j.ID, struct{}{}); loaded {
+		p.logDebugf("immediate job %q skipped (already queued or running)", j.ID)
+		return
+	}
+	job := j
+	go func() {
+		defer p.immediateRun.Delete(job.ID)
+		p.runJob(job)
+	}()
 }
 
 func (p *CronPlugin) runJob(j Job) {
@@ -297,7 +318,7 @@ func (p *CronPlugin) runJob(j Job) {
 		p.logErrorf("job %q RunAgent timeout (30m)", j.ID)
 	}
 
-	if success && j.RunOnce {
+	if success && (j.RunOnce || isImmediateSchedule(j.Schedule)) {
 		id := j.ID
 		go p.cleanupRunOnceJob(id)
 	}
