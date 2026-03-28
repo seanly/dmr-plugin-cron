@@ -36,7 +36,12 @@ path = "data/cron_jobs.json"
 
 DMR injects **`config_base_dir`** (absolute path of the config file’s directory) into the plugin JSON; do not set it manually.
 
-**`log_level`** (optional): `error` — only failures (RPC/agent errors, load errors, timeouts); `info` (default) — also lifecycle, a **single line per scheduler reload** (`scheduler reloaded: N enabled job(s)`), and invalid-job notices; `debug` — also every `registered job …` line and successful run step counts. Hosts using go-plugin may still label plugin stderr as DEBUG; this knob mainly reduces **how many** lines are emitted.
+**`log_level`** (optional):
+- `error` — only failures (RPC/agent errors, load errors, timeouts)
+- `info` (default) — also lifecycle, scheduler reload summary, invalid-job notices, **job execution start/completion with token usage**, and handoff anchor creation
+- `debug` — also every `registered job …` line, RunAgent call details with entry IDs, and successful run step counts
+
+Hosts using go-plugin may still label plugin stderr as DEBUG; this knob mainly reduces **how many** lines are emitted.
 
 ### Session tape and `cronAdd`
 
@@ -114,6 +119,7 @@ When the plugin is enabled with TOML `name = "cron"`, the host registers these t
 
 - **Schedule**: 5-field cron (`robfig/cron` standard), evaluated in `timezone` (or host local if unset).
 - **Execution**: one global mutex serializes `RunAgent` calls.
+- **Handoff isolation**: each cron job execution creates a `TapeHandoff` anchor (named `cron:<job_id>`) before running the agent, isolating scheduled runs from user conversation history. The agent loads history only after this anchor, preventing context pollution between interactive sessions and automated tasks.
 - **Shutdown**: stops cron, waits for in-flight jobs up to ~45s; cancels runs with a 30-minute RPC safeguard per job.
 - **Feishu / Weixin**: run `cronAdd` from that DM’s session so `SessionTape` is the right `feishu:p2p:` / `weixin:p2p:` tape; put delivery instructions in `prompt`; enable the channel plugin on the host.
 - **One-shot reminders**: set `run_once: true` on `cronAdd` (or in the JSON file) so the job is removed after one successful execution; repeating schedules without `run_once` stay until `cronRemove` or manual edit.

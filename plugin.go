@@ -315,11 +315,42 @@ func (p *CronPlugin) runJob(j Job) {
 		return
 	}
 
+	// Create handoff anchor to isolate cron execution from user conversation history
+	p.logInfof("job %q starting execution on tape %q", j.ID, j.TapeName)
+	handoffReq := &proto.TapeHandoffRequest{
+		TapeName:  j.TapeName,
+		Name:      fmt.Sprintf("cron:%s", j.ID),
+		StateJSON: fmt.Sprintf(`{"type":"cron","job_id":%q,"schedule":%q,"timestamp":%q}`, j.ID, j.Schedule, time.Now().Format(time.RFC3339)),
+	}
+	var handoffResp proto.TapeHandoffResponse
+	handoffDone := make(chan error, 1)
+	go func() {
+		handoffDone <- hc.Call("Plugin.TapeHandoff", handoffReq, &handoffResp)
+	}()
+
+	var anchorEntryID int32
+	select {
+	case err := <-handoffDone:
+		if err != nil {
+			p.logErrorf("job %q TapeHandoff RPC error: %v", j.ID, err)
+			return
+		}
+		anchorEntryID = int32(handoffResp.AnchorEntryID)
+		p.logInfof("job %q created handoff anchor at entry %d", j.ID, anchorEntryID)
+	case <-ctx.Done():
+		p.logInfof("job %q cancelled during handoff", j.ID)
+		return
+	case <-time.After(10 * time.Second):
+		p.logErrorf("job %q TapeHandoff timeout (10s)", j.ID)
+		return
+	}
+
 	req := &proto.RunAgentRequest{
 		TapeName:            j.TapeName,
 		Prompt:              cronPrefixedPrompt(j.TapeName, j.Prompt),
-		HistoryAfterEntryID: 0,
+		HistoryAfterEntryID: anchorEntryID,
 	}
+	p.logDebugf("job %q calling RunAgent with history after entry %d", j.ID, anchorEntryID)
 	var resp proto.RunAgentResponse
 	done := make(chan error, 1)
 	go func() {
@@ -337,7 +368,7 @@ func (p *CronPlugin) runJob(j Job) {
 			p.logErrorf("job %q agent error: %s", j.ID, resp.Error)
 		} else {
 			success = true
-			p.logDebugf("job %q completed steps=%d", j.ID, resp.Steps)
+			p.logInfof("job %q completed successfully (steps=%d, prompt_tokens=%d, completion_tokens=%d)", j.ID, resp.Steps, resp.PromptTokens, resp.CompletionTokens)
 		}
 	case <-ctx.Done():
 		p.logInfof("job %q cancelled during shutdown", j.ID)
