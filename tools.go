@@ -47,7 +47,7 @@ func cronToolDefs() []proto.ToolDef {
 		},
 		{
 			Name:        "cronAdd",
-			Description: "Create or replace a cron job (upsert). After success, the scheduler reloads. You must set tape_name (e.g. feishu:p2p:<chat_id>) — CallTool does not receive the current tape automatically. Use run_once=true for one-shot reminders (auto-deleted after first successful run).",
+			Description: "Create or replace a cron job (upsert) on the current DMR session tape only. The host fills the tape from the agent context; do not pass tape_name. After success, the scheduler reloads. Use run_once=true for one-shot reminders (auto-deleted after first successful run).",
 			ParametersJSON: `{
   "type": "object",
   "properties": {
@@ -58,10 +58,6 @@ func cronToolDefs() []proto.ToolDef {
     "schedule": {
       "type": "string",
       "description": "5-field cron (minute hour day-of-month month day-of-week, e.g. 0 20 * * *), robfig descriptor such as @every 1h, or now / @now for one immediate run (removed from storage after first successful RunAgent; failures keep the job for retry on next reload)."
-    },
-    "tape_name": {
-      "type": "string",
-      "description": "DMR tape name where RunAgent will run (e.g. feishu:p2p:oc_xxx)."
     },
     "prompt": {
       "type": "string",
@@ -76,7 +72,7 @@ func cronToolDefs() []proto.ToolDef {
       "description": "If true, remove this job from storage after the first successful RunAgent (no RPC error and empty agent error). Failed runs keep the job for the next schedule tick. Default false."
     }
   },
-  "required": ["schedule", "tape_name", "prompt"]
+  "required": ["schedule", "prompt"]
 }`,
 		},
 		{
@@ -126,7 +122,7 @@ func (p *CronPlugin) CallTool(req *proto.CallToolRequest, resp *proto.CallToolRe
 		p.scheduleReloadFromStorage()
 		return writeResult(resp, map[string]any{"ok": true})
 	case "cronAdd":
-		return p.toolAdd(ctx, args, resp)
+		return p.toolAdd(ctx, req, args, resp)
 	case "cronRemove":
 		return p.toolRemove(ctx, args, resp)
 	default:
@@ -190,15 +186,15 @@ func (p *CronPlugin) toolShow(ctx context.Context, args map[string]any, resp *pr
 	return writeResult(resp, j)
 }
 
-func (p *CronPlugin) toolAdd(ctx context.Context, args map[string]any, resp *proto.CallToolResponse) error {
+func (p *CronPlugin) toolAdd(ctx context.Context, req *proto.CallToolRequest, args map[string]any, resp *proto.CallToolResponse) error {
 	schedule, err := requireStringArg(args, "schedule")
 	if err != nil {
 		resp.Error = err.Error()
 		return nil
 	}
-	tape, err := requireStringArg(args, "tape_name")
-	if err != nil {
-		resp.Error = err.Error()
+	tape := strings.TrimSpace(req.SessionTape)
+	if tape == "" {
+		resp.Error = "cronAdd requires the host to send SessionTape (current agent session tape). Use dmr serve with an upgraded DMR, or add jobs by editing cron storage JSON instead of cronAdd"
 		return nil
 	}
 	prompt, err := requireStringArg(args, "prompt")
@@ -231,7 +227,7 @@ func (p *CronPlugin) toolAdd(ctx context.Context, args map[string]any, resp *pro
 		return nil
 	}
 	p.scheduleReloadFromStorage()
-	return writeResult(resp, map[string]any{"ok": true, "id": id})
+	return writeResult(resp, map[string]any{"ok": true, "id": id, "tape_name": tape})
 }
 
 func (p *CronPlugin) toolRemove(ctx context.Context, args map[string]any, resp *proto.CallToolResponse) error {
