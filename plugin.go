@@ -271,6 +271,19 @@ func (p *CronPlugin) queueImmediateRun(j Job) {
 	}()
 }
 
+// cronPrefixedPrompt prepends the job tape_name before the stored prompt so the model always sees which
+// DMR tape this scheduled run uses. Channel-specific delivery rules live in each plugin (e.g. Feishu/Weixin inbound hints).
+func cronPrefixedPrompt(tapeName, prompt string) string {
+	const stub = `【DMR·定时】本轮 RunAgent 的 tape_name=%q。
+
+[Cron] tape_name=%q.
+
+---
+
+%s`
+	return fmt.Sprintf(stub, tapeName, tapeName, prompt)
+}
+
 func (p *CronPlugin) runJob(j Job) {
 	p.runMu.Lock()
 	defer p.runMu.Unlock()
@@ -290,7 +303,7 @@ func (p *CronPlugin) runJob(j Job) {
 
 	req := &proto.RunAgentRequest{
 		TapeName:            j.TapeName,
-		Prompt:              j.Prompt,
+		Prompt:              cronPrefixedPrompt(j.TapeName, j.Prompt),
 		HistoryAfterEntryID: 0,
 	}
 	var resp proto.RunAgentResponse
