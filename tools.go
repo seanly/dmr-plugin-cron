@@ -123,7 +123,7 @@ func (p *CronPlugin) CallTool(req *proto.CallToolRequest, resp *proto.CallToolRe
 	case "cronShow":
 		return p.toolShow(ctx, args, resp)
 	case "cronReload":
-		p.reloadFromStorage()
+		p.scheduleReloadFromStorage()
 		return writeResult(resp, map[string]any{"ok": true})
 	case "cronAdd":
 		return p.toolAdd(ctx, args, resp)
@@ -230,7 +230,7 @@ func (p *CronPlugin) toolAdd(ctx context.Context, args map[string]any, resp *pro
 		resp.Error = err.Error()
 		return nil
 	}
-	p.reloadFromStorage()
+	p.scheduleReloadFromStorage()
 	return writeResult(resp, map[string]any{"ok": true, "id": id})
 }
 
@@ -244,7 +244,7 @@ func (p *CronPlugin) toolRemove(ctx context.Context, args map[string]any, resp *
 		resp.Error = err.Error()
 		return nil
 	}
-	p.reloadFromStorage()
+	p.scheduleReloadFromStorage()
 	return writeResult(resp, map[string]any{"ok": true, "id": id})
 }
 

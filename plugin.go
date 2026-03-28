@@ -50,6 +50,8 @@ type CronPlugin struct {
 	runMu       sync.Mutex // serial RunAgent
 	// immediateRun prevents duplicate goroutines for the same job id while an immediate run is in flight.
 	immediateRun sync.Map // string (job ID) -> struct{}
+	// asyncReloadWg tracks background applyJobs from tools / cleanup so Shutdown can wait.
+	asyncReloadWg sync.WaitGroup
 	shutdownCtx context.Context
 	cancelRun   context.CancelFunc
 }
@@ -203,6 +205,18 @@ func (p *CronPlugin) reloadFromStorage() {
 	p.applyJobs(p.effectiveLocation())
 }
 
+// scheduleReloadFromStorage runs reloadFromStorage in a goroutine so tool CallTool handlers
+// return before applyJobs calls cron.Stop(). Otherwise Stop waits for in-flight robfig
+// callbacks (runJob), and runJob is blocked on Plugin.RunAgent while the host waits on
+// CallTool — a nested RPC deadlock.
+func (p *CronPlugin) scheduleReloadFromStorage() {
+	p.asyncReloadWg.Add(1)
+	go func() {
+		defer p.asyncReloadWg.Done()
+		p.reloadFromStorage()
+	}()
+}
+
 func (p *CronPlugin) applyJobs(loc *time.Location) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -354,7 +368,7 @@ func (p *CronPlugin) cleanupRunOnceJob(id string) {
 		return
 	}
 	p.logDebugf("run_once job %q removed after successful run", id)
-	p.reloadFromStorage()
+	p.scheduleReloadFromStorage()
 }
 
 func (p *CronPlugin) Shutdown(req *proto.ShutdownRequest, resp *proto.ShutdownResponse) error {
@@ -364,6 +378,16 @@ func (p *CronPlugin) Shutdown(req *proto.ShutdownRequest, resp *proto.ShutdownRe
 	if p.reloadStop != nil {
 		close(p.reloadStop)
 		p.reloadStop = nil
+	}
+	done := make(chan struct{})
+	go func() {
+		p.asyncReloadWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Minute):
+		p.logErrorf("shutdown: timed out waiting for async scheduler reload(s)")
 	}
 	p.mu.Lock()
 	if p.cron != nil {
