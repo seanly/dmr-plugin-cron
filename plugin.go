@@ -57,6 +57,7 @@ type CronPlugin struct {
 }
 
 type cronPluginConfig struct {
+	TapeName       string `json:"tape_name"`
 	Timezone       string `json:"timezone"`
 	ConfigBaseDir  string `json:"config_base_dir"`
 	ReloadInterval string `json:"reload_interval"`
@@ -98,6 +99,12 @@ func (p *CronPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) erro
 	if err := json.Unmarshal([]byte(raw), &p.cfg); err != nil {
 		return fmt.Errorf("parse cron config: %w", err)
 	}
+
+	// Default tape_name to "cron" if not configured
+	if p.cfg.TapeName == "" {
+		p.cfg.TapeName = "cron"
+	}
+
 	p.logLevel = parseCronLogLevel(p.cfg.LogLevel)
 	if p.cfg.Storage.Driver == "" {
 		return fmt.Errorf("cron plugin: storage.driver is required")
@@ -118,7 +125,7 @@ func (p *CronPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) erro
 	p.storage = st
 
 	p.shutdownCtx, p.cancelRun = context.WithCancel(context.Background())
-	p.logInfof("init driver=%s config_base_dir=%q", p.cfg.Storage.Driver, p.cfg.ConfigBaseDir)
+	p.logInfof("init driver=%s tape_name=%s config_base_dir=%q", p.cfg.Storage.Driver, p.cfg.TapeName, p.cfg.ConfigBaseDir)
 
 	// go-plugin calls InitHost (SetHostClient) before Plugin.Init on the child; do not start
 	// the scheduler until both storage and hostClient are set.
@@ -305,6 +312,7 @@ func (p *CronPlugin) runJob(j Job) {
 	p.mu.Lock()
 	hc := p.hostClient
 	ctx := p.shutdownCtx
+	cronTape := p.cfg.TapeName
 	p.mu.Unlock()
 
 	if hc == nil {
@@ -315,12 +323,12 @@ func (p *CronPlugin) runJob(j Job) {
 		return
 	}
 
-	// Create handoff anchor to isolate cron execution from user conversation history
-	p.logInfof("job %q starting execution on tape %q", j.ID, j.TapeName)
+	// Step 1: Create handoff anchor on cron tape (not target tape)
+	p.logInfof("job %q starting execution on cron tape %q (target: %q)", j.ID, cronTape, j.TapeName)
 	handoffReq := &proto.TapeHandoffRequest{
-		TapeName:  j.TapeName,
+		TapeName:  cronTape,
 		Name:      fmt.Sprintf("cron:%s", j.ID),
-		StateJSON: fmt.Sprintf(`{"type":"cron","job_id":%q,"schedule":%q,"timestamp":%q}`, j.ID, j.Schedule, time.Now().Format(time.RFC3339)),
+		StateJSON: fmt.Sprintf(`{"type":"cron","job_id":%q,"schedule":%q,"target_tape":%q,"timestamp":%q}`, j.ID, j.Schedule, j.TapeName, time.Now().Format(time.RFC3339)),
 	}
 	var handoffResp proto.TapeHandoffResponse
 	handoffDone := make(chan error, 1)
@@ -333,24 +341,27 @@ func (p *CronPlugin) runJob(j Job) {
 	case err := <-handoffDone:
 		if err != nil {
 			p.logErrorf("job %q TapeHandoff RPC error: %v", j.ID, err)
+			p.addEventToTargetTape(hc, j.TapeName, j.ID, 0, "failed", fmt.Sprintf("handoff error: %v", err))
 			return
 		}
 		anchorEntryID = int32(handoffResp.AnchorEntryID)
-		p.logInfof("job %q created handoff anchor at entry %d", j.ID, anchorEntryID)
+		p.logInfof("job %q created handoff anchor at cron tape entry %d", j.ID, anchorEntryID)
 	case <-ctx.Done():
 		p.logInfof("job %q cancelled during handoff", j.ID)
 		return
 	case <-time.After(10 * time.Second):
 		p.logErrorf("job %q TapeHandoff timeout (10s)", j.ID)
+		p.addEventToTargetTape(hc, j.TapeName, j.ID, 0, "failed", "handoff timeout")
 		return
 	}
 
+	// Step 2: Execute RunAgent on cron tape
 	req := &proto.RunAgentRequest{
-		TapeName:            j.TapeName,
+		TapeName:            cronTape,
 		Prompt:              cronPrefixedPrompt(j.TapeName, j.Prompt),
 		HistoryAfterEntryID: anchorEntryID,
 	}
-	p.logDebugf("job %q calling RunAgent with history after entry %d", j.ID, anchorEntryID)
+	p.logDebugf("job %q calling RunAgent on cron tape with history after entry %d", j.ID, anchorEntryID)
 	var resp proto.RunAgentResponse
 	done := make(chan error, 1)
 	go func() {
@@ -362,23 +373,74 @@ func (p *CronPlugin) runJob(j Job) {
 	case err := <-done:
 		if err != nil {
 			p.logErrorf("job %q RunAgent RPC error: %v", j.ID, err)
+			p.addEventToTargetTape(hc, j.TapeName, j.ID, anchorEntryID, "failed", fmt.Sprintf("agent error: %v", err))
 			return
 		}
 		if resp.Error != "" {
 			p.logErrorf("job %q agent error: %s", j.ID, resp.Error)
+			p.addEventToTargetTape(hc, j.TapeName, j.ID, anchorEntryID, "error", resp.Error)
 		} else {
 			success = true
 			p.logInfof("job %q completed successfully (steps=%d, prompt_tokens=%d, completion_tokens=%d)", j.ID, resp.Steps, resp.PromptTokens, resp.CompletionTokens)
+			// Step 3: Add success event to target tape
+			p.addEventToTargetTape(hc, j.TapeName, j.ID, anchorEntryID, "success", "")
 		}
 	case <-ctx.Done():
 		p.logInfof("job %q cancelled during shutdown", j.ID)
+		return
 	case <-time.After(30 * time.Minute):
 		p.logErrorf("job %q RunAgent timeout (30m)", j.ID)
+		p.addEventToTargetTape(hc, j.TapeName, j.ID, anchorEntryID, "timeout", "execution timeout (30m)")
+		return
 	}
 
 	if success && (j.RunOnce || isImmediateSchedule(j.Schedule)) {
 		id := j.ID
 		go p.cleanupRunOnceJob(id)
+	}
+}
+
+// addEventToTargetTape adds a lightweight event entry to the target tape.
+func (p *CronPlugin) addEventToTargetTape(hc *rpc.Client, targetTape, jobID string, cronEntryID int32, status, errorMsg string) {
+	if hc == nil {
+		return
+	}
+
+	p.mu.Lock()
+	cronTape := p.cfg.TapeName
+	p.mu.Unlock()
+
+	// Build event data JSON
+	eventData := fmt.Sprintf(`{"type":"cron_event","job_id":%q,"cron_tape":%q,"cron_entry_id":%d,"status":%q,"timestamp":%q`,
+		jobID, cronTape, cronEntryID, status, time.Now().Format(time.RFC3339))
+	if errorMsg != "" {
+		eventData += fmt.Sprintf(`,"error":%q`, errorMsg)
+	}
+	eventData += "}"
+
+	req := &proto.AddTapeEventRequest{
+		TapeName:  targetTape,
+		EventType: "cron",
+		EventData: eventData,
+	}
+
+	var resp proto.AddTapeEventResponse
+	done := make(chan error, 1)
+	go func() {
+		done <- hc.Call("Plugin.AddTapeEvent", req, &resp)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			p.logErrorf("failed to add event to target tape %q: %v", targetTape, err)
+		} else if resp.Error != "" {
+			p.logErrorf("failed to add event to target tape %q: %s", targetTape, resp.Error)
+		} else {
+			p.logDebugf("added cron event to target tape %q (entry %d)", targetTape, resp.EntryID)
+		}
+	case <-time.After(5 * time.Second):
+		p.logErrorf("timeout adding event to target tape %q", targetTape)
 	}
 }
 
